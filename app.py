@@ -7,7 +7,6 @@ from bs4 import BeautifulSoup
 import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
 from urllib.parse import urlparse
 
 # Article processor functions
@@ -70,7 +69,7 @@ def preprocess_text(text):
     
     return text
 
-# Graph manager functions
+# Graph manager class
 class ArticleGraph:
     """Manages the article graph and provides analysis methods"""
     
@@ -81,6 +80,8 @@ class ArticleGraph:
         self.vectors = {}
         self.contents = {}
         self.fitted = False
+        self.good_centroid = None
+        self.bad_centroid = None
         
     def add_article(self, article):
         """Add an article to the graph"""
@@ -89,10 +90,10 @@ class ArticleGraph:
             article['id'] = re.sub(r'[^\w]', '_', article['url'])
         
         # Standardize cluster format (convert 0/1 to "good"/"bad")
-        if 'cluster' in article:
-            if article['cluster'] == 0 or article['cluster'] == '0':
+        if 'category' in article:
+            if article['category'] in [0, '0']:
                 article['cluster'] = "good"
-            elif article['cluster'] == 1 or article['cluster'] == '1':
+            elif article['category'] in [1, '1']:
                 article['cluster'] = "bad"
         
         # Add node to graph
@@ -125,7 +126,30 @@ class ArticleGraph:
         
         # Transform all documents
         for article_id, content in self.contents.items():
-            self.vectors[article_id] = self.vectorizer.transform([content])
+            self.vectors[article_id] = self.vectorizer.transform([content])[0]
+        
+        # Calculate centroids for each cluster
+        self._calculate_centroids()
+    
+    def _calculate_centroids(self):
+        """Calculate centroid vectors for good and bad clusters"""
+        # Get nodes by cluster
+        good_nodes = [n for n in self.G.nodes() if self.G.nodes[n].get('cluster') == 'good']
+        bad_nodes = [n for n in self.G.nodes() if self.G.nodes[n].get('cluster') == 'bad']
+        
+        # Calculate good centroid if we have good nodes
+        if good_nodes and all(node in self.vectors for node in good_nodes):
+            good_vectors = [self.vectors[node] for node in good_nodes]
+            self.good_centroid = sum(good_vectors) / len(good_vectors)
+        else:
+            self.good_centroid = None
+        
+        # Calculate bad centroid if we have bad nodes
+        if bad_nodes and all(node in self.vectors for node in bad_nodes):
+            bad_vectors = [self.vectors[node] for node in bad_nodes]
+            self.bad_centroid = sum(bad_vectors) / len(bad_vectors)
+        else:
+            self.bad_centroid = None
     
     def calculate_similarities(self, article_id):
         """Calculate similarities between an article and all others"""
@@ -142,12 +166,14 @@ class ArticleGraph:
         
         for node_id, vector in self.vectors.items():
             if node_id != article_id:
-                sim = cosine_similarity(target_vector, vector)[0][0]
+                # Convert sparse vectors to dense for computation
+                sim = cosine_similarity(target_vector.reshape(1, -1), 
+                                        vector.reshape(1, -1))[0][0]
                 similarities[node_id] = sim
                 
         return similarities
     
-    def update_edges(self, article_id, threshold=0.2):  # Lower threshold from 0.3 to 0.2
+    def update_edges(self, article_id, threshold=0.7):  # Lower threshold to 0.3
         """Update graph edges based on similarities"""
         similarities = self.calculate_similarities(article_id)
         
@@ -156,48 +182,37 @@ class ArticleGraph:
             if sim > threshold:
                 self.G.add_edge(article_id, node_id, weight=sim)
     
-    def extract_features(self, article_id):
-        """Extract graph features for classification"""
-        # Initialize features with default values
-        features = {
-            'avg_sim_good': 0,
-            'avg_sim_bad': 0,
-            'max_sim_good': 0,
-            'max_sim_bad': 0,
-            'count_good': 0,
-            'count_bad': 0
+    def calculate_centroid_similarities(self, article_id):
+        """Calculate similarities between article and cluster centroids"""
+        # Make sure we have fitted the vectorizer and calculated centroids
+        if not self.fitted:
+            self._fit_vectorizer()
+        
+        # Initialize similarities
+        similarities = {
+            'good_similarity': 0,
+            'bad_similarity': 0
         }
         
-        # Get neighbors
-        neighbors = list(self.G.neighbors(article_id))
+        # Get article vector
+        if article_id not in self.vectors:
+            return similarities
         
-        if not neighbors:
-            # No neighbors means no connections to analyze
-            return features
+        article_vector = self.vectors[article_id]
         
-        # Calculate average similarity to each known cluster
-        cluster_similarities = {'good': [], 'bad': []}
+        # Calculate similarity with good centroid
+        if self.good_centroid is not None:
+            good_sim = cosine_similarity(article_vector.reshape(1, -1), 
+                                          self.good_centroid.reshape(1, -1))[0][0]
+            similarities['good_similarity'] = good_sim
         
-        for neighbor in neighbors:
-            cluster = self.G.nodes[neighbor].get('cluster')
-            if cluster in ['good', 'bad']:
-                edge_weight = self.G[article_id][neighbor]['weight']
-                cluster_similarities[cluster].append(edge_weight)
+        # Calculate similarity with bad centroid
+        if self.bad_centroid is not None:
+            bad_sim = cosine_similarity(article_vector.reshape(1, -1), 
+                                         self.bad_centroid.reshape(1, -1))[0][0]
+            similarities['bad_similarity'] = bad_sim
         
-        # Calculate metrics for each cluster
-        for cluster, sims in cluster_similarities.items():
-            if sims:  # Only if we have similarities for this cluster
-                features[f'avg_sim_{cluster}'] = np.mean(sims)
-                features[f'max_sim_{cluster}'] = np.max(sims)
-                features[f'count_{cluster}'] = len(sims)
-        
-        return features
-    
-    def get_labeled_nodes(self):
-        """Get nodes with cluster labels"""
-        return {node: data['cluster'] 
-                for node, data in self.G.nodes(data=True) 
-                if data.get('cluster') is not None}
+        return similarities
                 
     def visualize(self, highlight_node=None):
         """Create a visualization of the graph"""
@@ -248,67 +263,36 @@ class ArticleGraph:
         plt.axis('off')
         return plt.gcf()
         
-# Classifier functions
+# Classifier class
 class GraphClassifier:
-    """Classifies articles based on graph features"""
+    """Classifies articles based solely on distance from centroids"""
     
-    def predict(self, features):
-        """Improved rule-based prediction based on graph features"""
+    def predict(self, similarities):
+        """Simple centroid-based prediction using cosine similarities"""
         result = {
-            'article_id': None,
             'predicted_cluster': None,
             'confidence': 0,
-            'supporting_evidence': []
         }
         
-        # Get similarity and count features with proper handling of None values
-        good_sim = features.get('avg_sim_good', 0) or 0
-        bad_sim = features.get('avg_sim_bad', 0) or 0
+        # Extract the centroid similarities
+        good_sim = similarities.get('good_similarity', 0)
+        bad_sim = similarities.get('bad_similarity', 0)
         
-        good_count = features.get('count_good', 0) or 0
-        bad_count = features.get('count_bad', 0) or 0
-        
-        # Decision logic - first try using max similarity
-        max_good = features.get('max_sim_good', 0) or 0
-        max_bad = features.get('max_sim_bad', 0) or 0
-        
-        # If we have strong connections to either class, use that
-        if max_good > 0.6 and max_good > max_bad:
+        # Compare distances to centroids - use whichever is higher
+        if good_sim > bad_sim:
             result['predicted_cluster'] = "good"
-            result['confidence'] = max_good
-            return result
-        
-        if max_bad > 0.6 and max_bad > max_good:
+            # Calculate confidence based on difference
+            diff = good_sim - bad_sim
+            result['confidence'] = 0.5 + min(0.5, diff)
+        elif bad_sim > good_sim:
             result['predicted_cluster'] = "bad"
-            result['confidence'] = max_bad
-            return result
-        
-        # Otherwise use average similarities if they differ significantly
-        if abs(good_sim - bad_sim) > 0.05:
-            if good_sim > bad_sim:
-                result['predicted_cluster'] = "good"
-                result['confidence'] = good_sim
-            else:
-                result['predicted_cluster'] = "bad"
-                result['confidence'] = bad_sim
-        # If similarities are very close, use counts
-        elif good_count != bad_count:
-            total_connections = good_count + bad_count
-            if total_connections == 0:
-                # No connections at all, default to unknown
-                result['predicted_cluster'] = "unknown"
-                result['confidence'] = 0.5
-            elif good_count > bad_count:
-                result['predicted_cluster'] = "good"
-                result['confidence'] = 0.5 + (good_count / total_connections) * 0.5
-            else:
-                result['predicted_cluster'] = "bad"
-                result['confidence'] = 0.5 + (bad_count / total_connections) * 0.5
+            diff = bad_sim - good_sim
+            result['confidence'] = 0.5 + min(0.5, diff)
         else:
-            # If everything is tied, slightly favor "good" as a more neutral default
-            result['predicted_cluster'] = "good"
-            result['confidence'] = 0.51
-            
+            # Equal distances
+            result['predicted_cluster'] = "unknown"
+            result['confidence'] = 0.5
+                
         return result
 
 # Main Streamlit application
@@ -336,11 +320,6 @@ def main():
             try:
                 df = pd.read_csv(uploaded_file)
                 st.success(f"Loaded {len(df)} articles")
-                
-                # Display CSV structure for debugging
-                with st.expander("Show CSV Structure"):
-                    st.write(df.head())
-                    st.write("Columns:", df.columns.tolist())
                 
                 # Process CSV data button
                 if st.button("Process CSV Data"):
@@ -396,6 +375,9 @@ def main():
                         for article_id in st.session_state.graph.G.nodes():
                             st.session_state.graph.update_edges(article_id)
                         
+                        # Make sure to fit the vectorizer and calculate centroids
+                        st.session_state.graph._fit_vectorizer()
+                        
                         st.success(f"Graph updated: {good_count} good, {bad_count} bad articles")
             except Exception as e:
                 st.error(f"Error processing CSV: {str(e)}")
@@ -416,22 +398,27 @@ def main():
                     # Update edges
                     st.session_state.graph.update_edges(article_id)
                     
+                    # Make sure vectorizer is fitted and centroids calculated
+                    if not st.session_state.graph.fitted:
+                        st.session_state.graph._fit_vectorizer()
+                    
+                    # Calculate similarities
+                    centroid_similarities = st.session_state.graph.calculate_centroid_similarities(article_id)
+                    
                     # Classify
-                    features = st.session_state.graph.extract_features(article_id)
-                    result = st.session_state.classifier.predict(features)
-                    result['article_id'] = article_id
+                    result = st.session_state.classifier.predict(centroid_similarities)
                     
                     st.session_state.current_article = article_id
                     st.session_state.classification_result = result
-                    st.session_state.current_features = features
+                    st.session_state.centroid_similarities = centroid_similarities
                     
                     st.success("Article processed successfully")
                     
             except Exception as e:
                 st.error(f"Error processing article: {str(e)}")
     
-    # Main content area
-    tab1, tab2, tab3 = st.tabs(["Graph Visualization", "Article Analysis", "Debug Info"])
+    # Main content area with tabs
+    tab1, tab2 = st.tabs(["Graph Visualization", "Article Classification"])
     
     with tab1:
         st.header("Article Graph")
@@ -477,6 +464,13 @@ def main():
                 st.error(f"This article refers to the **BAD** Samuel Jackson (Confidence: {confidence:.2f})")
             else:
                 st.warning(f"Unable to determine which Samuel Jackson (Confidence: {confidence:.2f})")
+            
+            # Display centroid similarities for debugging
+            if 'centroid_similarities' in st.session_state:
+                sims = st.session_state.centroid_similarities
+                st.subheader("Debug: Centroid Similarities")
+                st.write(f"Similarity to GOOD centroid: {sims.get('good_similarity', 0):.4f}")
+                st.write(f"Similarity to BAD centroid: {sims.get('bad_similarity', 0):.4f}")
                 
             # Show article details
             if 'current_article' in st.session_state:
@@ -490,64 +484,6 @@ def main():
                     st.write(article_data['content'][:500] + "..." if len(article_data['content']) > 500 else article_data['content'])
         else:
             st.info("Process an article to see classification results")
-    
-    with tab3:
-        st.header("Debug Information")
-        
-        if 'current_features' in st.session_state:
-            st.subheader("Classification Features")
-            features = st.session_state.current_features
-            
-            # Create a DataFrame for better display
-            feature_df = pd.DataFrame({
-                'Feature': features.keys(),
-                'Value': features.values()
-            })
-            
-            st.dataframe(feature_df)
-            
-            # Show key metrics for decision making
-            st.subheader("Key Metrics")
-            cols = st.columns(2)
-            
-            with cols[0]:
-                st.metric("Good Similarity", f"{features.get('avg_sim_good', 0):.3f}")
-                st.metric("Good Max Similarity", f"{features.get('max_sim_good', 0):.3f}")
-                st.metric("Good Connections", features.get('count_good', 0))
-                
-            with cols[1]:
-                st.metric("Bad Similarity", f"{features.get('avg_sim_bad', 0):.3f}")
-                st.metric("Bad Max Similarity", f"{features.get('max_sim_bad', 0):.3f}")
-                st.metric("Bad Connections", features.get('count_bad', 0))
-                
-            # Show neighboring articles
-            if 'current_article' in st.session_state:
-                st.subheader("Connected Articles")
-                article_id = st.session_state.current_article
-                
-                # Get neighbors
-                neighbors = list(st.session_state.graph.G.neighbors(article_id))
-                if neighbors:
-                    neighbor_data = []
-                    for neighbor in neighbors:
-                        node_data = st.session_state.graph.G.nodes[neighbor]
-                        edge_data = st.session_state.graph.G[article_id][neighbor]
-                        
-                        neighbor_data.append({
-                            'ID': neighbor,
-                            'Title': node_data.get('title', 'Unknown'),
-                            'Cluster': node_data.get('cluster', 'unknown'),
-                            'Similarity': edge_data.get('weight', 0)
-                        })
-                    
-                    # Create DataFrame and display sorted by similarity
-                    neighbor_df = pd.DataFrame(neighbor_data)
-                    neighbor_df = neighbor_df.sort_values('Similarity', ascending=False)
-                    st.dataframe(neighbor_df)
-                else:
-                    st.info("No connected articles")
-        else:
-            st.info("Process an article to see debug information")
 
 if __name__ == "__main__":
     main()

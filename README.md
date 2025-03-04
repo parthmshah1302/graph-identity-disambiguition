@@ -291,5 +291,5 @@ class ClassificationResult:
 3. **Advanced Visualization**: Add more interactive visualization options
 4. **API Interface**: Create simple API for integration with other systems -->
 Testing articles 
-- Bad: https://www.cbsnews.com/chicago/news/3-chicago-area-residents-charged-with-covid-19-relief-fraud/ 
+- Bad: https://www.swlexledger.com/single-post/2019/04/03/sam-jackson-s-case-transferred-to-sc-attorney-general-for-prosecution-new-bond-hearing-wa 
 - Good: https://movieweb.com/samuel-l-jackson-robert-downey-jr-reunite-oscars/

@@ -290,3 +290,6 @@ class ClassificationResult:
 2. **Active Learning**: Implement feedback mechanism to improve the model over time
 3. **Advanced Visualization**: Add more interactive visualization options
 4. **API Interface**: Create simple API for integration with other systems -->
+Testing articles 
+- Bad: https://www.cbsnews.com/chicago/news/3-chicago-area-residents-charged-with-covid-19-relief-fraud/ 
+- Good: https://movieweb.com/samuel-l-jackson-robert-downey-jr-reunite-oscars/
